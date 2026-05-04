@@ -11,6 +11,7 @@ vit:
 
 text_encoder:
   model_name: sentence-transformers/all-MiniLM-L6-v2
+  d_text: 384
 
 projection:
   d_proj: 256

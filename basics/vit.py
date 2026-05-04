@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+from basics.model import Block
 
 
 class PatchEmbeddings(nn.Module):
@@ -32,13 +33,18 @@ class PatchEmbeddings(nn.Module):
         self.img_size = img_size
         self.patch_size = patch_size
         self.num_patches = (img_size // patch_size) ** 2
-        # TODO: implement.
         # Hint: use nn.Conv2d with kernel_size=patch_size, stride=patch_size,
         # in_channels=3, out_channels=d_model. Then flatten the spatial dims
         # and transpose so each patch is a token.
         self.embeddings = nn.Conv2d(kernel_size=patch_size, stride=patch_size, in_channels=3, out_channels=d_model)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args: 
+            x: (B, 3, img_size, img_size) float tensor.
+        Returns:
+            (B, num_patches, d_model) float tensor.
+        """
         return self.embeddings(x).flatten(2, 3).transpose(-1, -2)
 
 
@@ -75,7 +81,30 @@ class ViT(nn.Module):
         # Hint: store self.cls_token as nn.Parameter(torch.zeros(1, 1, d_model))
         # and self.pos_embed as nn.Parameter(torch.zeros(1, num_patches+1, d_model)).
         # Use basics.model.Block(..., is_decoder=False) for the encoder blocks.
-        raise NotImplementedError
-
+        self.patch_embed = PatchEmbeddings(img_size=img_size, patch_size=patch_size, d_model=d_model)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
+        num_patches = self.patch_embed.num_patches
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches+1, d_model))
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.num_blocks = num_blocks
+        self.dropout = dropout
+        self.blocks = nn.ModuleList(Block(d_model=self.d_model, num_heads=self.num_heads,block_size=self.patch_embed.num_patches+1, is_decoder=False, dropout=self.dropout) for _ in range(num_blocks))
+        
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
+        patch_embeddings = self.patch_embed(x)
+        cls_expanded = self.cls_token.expand(x.shape[0], -1, -1)
+        token = torch.cat([cls_expanded, patch_embeddings], dim=1)
+        token += self.pos_embed
+
+        # pass the sequence through num_blocks Transformer blocks
+        for transformer_block in self.blocks:
+            token = transformer_block(token)
+
+        # apply a final layernorm
+        ln = nn.LayerNorm(self.d_model)
+        token = ln(token)
+
+        cls_token = token[:, 0, :]
+        return cls_token
+

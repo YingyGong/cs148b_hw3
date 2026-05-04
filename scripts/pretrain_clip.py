@@ -15,6 +15,11 @@ from pathlib import Path
 import torch
 import yaml
 
+from vlm.data import build_eurosat_loaders, EUROSAT_CLASSES
+from basics.vit import ViT
+from basics.text_encoder import FrozenTextEncoder
+from vlm.clip import ProjectionHeads, init_logit_scale, clip_loss
+from vlm.eval import zeroshot_classification_accuracy
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
@@ -44,9 +49,53 @@ def main() -> None:
     #         - Compute zero-shot val accuracy via vlm.eval.zeroshot_classification_accuracy.
     #         - Log to stdout (and W&B if args.wandb).
     #   6. Save the best checkpoint to args.output_dir / "best.pt".
-    raise NotImplementedError(
-        "Implement the CLIP pretraining loop in scripts/pretrain_clip.py."
-    )
+    
+    device = torch.device(args.device)
+    class_prompts = [f"a satellite image of {c}" for c in EUROSAT_CLASSES]
+    class_indices = list(range(len(EUROSAT_CLASSES)))
+
+    train_loader, val_loader, test_loader = build_eurosat_loaders()
+
+    vit_config = cfg["vit"]
+    vit = ViT(
+        image_size=vit_config["img_size"], patch_size=vit_config["patch_size"], d_model=vit_config["d_model"], num_heads=vit_config["num_heads"], num_blocks=vit_config["num_blocks"], dropout=vit_config["dropout"])
+    
+    text_encoder = FrozenTextEncoder(model_name=cfg["text_encoder"]["model_name"])
+
+    projection_heads = ProjectionHeads(d_image=vit_config["d_model"], d_text=cfg["text_encoder"]["d_text"], d_proj=cfg["projection"]["d_proj"])
+    logit_scale = init_logit_scale()
+
+    optimizer = torch.optim.AdamW(
+        list(vit.parameters()) + list(projection_heads.parameters()) + [logit_scale],
+        lr=cfg["optim"]["lr"],
+        weight_decay=cfg["optim"]["weight_decay"],
+        betas=tuple(cfg["optim"]["betas"]))
+
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=cfg["train"]["num_epochs"]
+        )
+
+    num_epochs = cfg["train"]["num_epochs"]
+    for epoch in range(num_epochs):
+        for imgs, captions in train_loader:
+            optimizer.zero_grad()
+            image_emb = vit(imgs)
+            text_emb = text_encoder(captions)
+            # emb = projection_heads(image_emb, text_emb)
+            logit_scale.data.clamp_(max=torch.log(torch.tensor(100.0)))
+            loss = clip_loss(image_emb, text_emb, logit_scale)
+            loss.backward()
+            optimizer.step()
+
+        with torch.no_grad():
+            val_acc = zeroshot_classification_accuracy(
+                vit, projection_heads, text_encoder, val_loader,
+                class_prompts, class_indices, device,
+            )
+        print(f"epoch {epoch+1}/{num_epochs}  val_acc={val_acc:.4f}")
+        scheduler.step()
+
 
 
 if __name__ == "__main__":
