@@ -36,10 +36,10 @@ class PatchEmbeddings(nn.Module):
         # Hint: use nn.Conv2d with kernel_size=patch_size, stride=patch_size,
         # in_channels=3, out_channels=d_model. Then flatten the spatial dims
         # and transpose so each patch is a token.
-        raise NotImplementedError
-
+        self.embeddings = nn.Conv2d(kernel_size=patch_size, stride=patch_size, in_channels=3, out_channels=d_model)
+        
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
+        return self.embeddings(x).flatten(2, 3).transpose(-1, -2)
 
 
 class ViT(nn.Module):

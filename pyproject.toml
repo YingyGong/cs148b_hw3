@@ -18,7 +18,6 @@ dependencies = [
     "wandb>=0.18.0",
     "pyyaml>=6.0.0",
     "einops>=0.8.0",
-    "nvidia-cusparselt-cu12>=0.7.1",
 ]
 
 [project.optional-dependencies]
