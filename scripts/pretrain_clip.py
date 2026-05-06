@@ -54,47 +54,76 @@ def main() -> None:
     class_prompts = [f"a satellite image of {c}" for c in EUROSAT_CLASSES]
     class_indices = list(range(len(EUROSAT_CLASSES)))
 
-    train_loader, val_loader, test_loader = build_eurosat_loaders()
+    train_loader, val_loader, test_loader = build_eurosat_loaders(
+        batch_size=cfg["train"]["batch_size"],
+        num_workers=cfg["train"]["num_workers"],
+    )
 
     vit_config = cfg["vit"]
     vit = ViT(
-        image_size=vit_config["img_size"], patch_size=vit_config["patch_size"], d_model=vit_config["d_model"], num_heads=vit_config["num_heads"], num_blocks=vit_config["num_blocks"], dropout=vit_config["dropout"])
-    
-    text_encoder = FrozenTextEncoder(model_name=cfg["text_encoder"]["model_name"])
+        image_size=vit_config["img_size"], patch_size=vit_config["patch_size"],
+        d_model=vit_config["d_model"], num_heads=vit_config["num_heads"],
+        num_blocks=vit_config["num_blocks"], dropout=vit_config["dropout"],
+    ).to(device)
 
-    projection_heads = ProjectionHeads(d_image=vit_config["d_model"], d_text=cfg["text_encoder"]["d_text"], d_proj=cfg["projection"]["d_proj"])
-    logit_scale = init_logit_scale()
+    text_encoder = FrozenTextEncoder(model_name=cfg["text_encoder"]["model_name"]).to(device)
+
+    projection_heads = ProjectionHeads(
+        d_image=vit_config["d_model"],
+        d_text=cfg["text_encoder"]["d_text"],
+        d_proj=cfg["projection"]["d_proj"],
+    ).to(device)
+    logit_scale = init_logit_scale().to(device)
 
     optimizer = torch.optim.AdamW(
         list(vit.parameters()) + list(projection_heads.parameters()) + [logit_scale],
         lr=cfg["optim"]["lr"],
         weight_decay=cfg["optim"]["weight_decay"],
-        betas=tuple(cfg["optim"]["betas"]))
-
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer,
-        T_max=cfg["train"]["num_epochs"]
-        )
+        betas=tuple(cfg["optim"]["betas"]),
+    )
 
     num_epochs = cfg["train"]["num_epochs"]
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
+
+    if args.wandb:
+        import wandb
+        wandb.init(project="clip-eurosat", config=cfg)
+
+    best_val_acc = -1.0
     for epoch in range(num_epochs):
+        vit.train()
+        projection_heads.train()
         for imgs, captions in train_loader:
+            imgs = imgs.to(device)
             optimizer.zero_grad()
             image_emb = vit(imgs)
             text_emb = text_encoder(captions)
-            # emb = projection_heads(image_emb, text_emb)
-            logit_scale.data.clamp_(max=torch.log(torch.tensor(100.0)))
-            loss = clip_loss(image_emb, text_emb, logit_scale)
+            image_proj, text_proj = projection_heads(image_emb, text_emb)
+            loss = clip_loss(image_proj, text_proj, logit_scale)
             loss.backward()
             optimizer.step()
+            logit_scale.data.clamp_(max=torch.log(torch.tensor(100.0)))
 
-        with torch.no_grad():
-            val_acc = zeroshot_classification_accuracy(
-                vit, projection_heads, text_encoder, val_loader,
-                class_prompts, class_indices, device,
-            )
+        val_acc = zeroshot_classification_accuracy(
+            vit, projection_heads, text_encoder, val_loader,
+            class_prompts, class_indices, device,
+        )
         print(f"epoch {epoch+1}/{num_epochs}  val_acc={val_acc:.4f}")
+        if args.wandb:
+            wandb.log({"val_acc": val_acc, "epoch": epoch + 1})
         scheduler.step()
+
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            torch.save(
+                {
+                    "epoch": epoch + 1,
+                    "vit": vit.state_dict(),
+                    "projection_heads": projection_heads.state_dict(),
+                    "logit_scale": logit_scale.data,
+                },
+                args.output_dir / "best.pt",
+            )
 
 
 
